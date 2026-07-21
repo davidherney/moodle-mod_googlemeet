@@ -344,17 +344,20 @@ EOD;
             }
 
             $meetingcode = substr($googlemeet->url, 24, 12);
-            $name = $googlemeet->name;
+            $hasoriginalname = !empty(trim($googlemeet->originalname ?? ''));
+            $name = $hasoriginalname ? trim($googlemeet->originalname) : trim($googlemeet->name);
             $customfilter = trim($googlemeet->recordingfilter ?? '');
 
-            // Build name filter: always include meetingcode + name as fallbacks,
-            // plus custom filter if set. This avoids the problem where a custom
-            // filter is an incorrect substring that doesn't match the actual filename.
-            $conditions = [];
-            $conditions[] = 'name contains "' . $meetingcode . '"';
-            $conditions[] = 'name contains "' . $name . '"';
-            if (!empty($customfilter) && $customfilter !== $name) {
-                $conditions[] = 'name contains "' . $customfilter . '"';
+            // Keep the Drive query broad enough for Google's generated suffixes. A stricter,
+            // delimiter-aware prefix check is applied locally below. A custom filter is
+            // exclusive: it must not fall back to the activity name or meeting code.
+            if (!empty($customfilter)) {
+                $conditions = ['name contains "' . $customfilter . '"'];
+            } else {
+                $conditions = [
+                    'name contains "' . $meetingcode . '"',
+                    'name contains "' . $name . '"',
+                ];
             }
             $namefilter = '(' . implode(' or ', $conditions) . ')';
 
@@ -385,7 +388,14 @@ EOD;
             $recordings = $recordingresponse->files;
 
             // Additional filtering for duplicate check across activities.
-            $recordings = $this->filter_recordings_for_activity($recordings, $meetingcode, $name, $googlemeet->id, $customfilter);
+            $recordings = $this->filter_recordings_for_activity(
+                $recordings,
+                $meetingcode,
+                $name,
+                $googlemeet->id,
+                $customfilter,
+                $hasoriginalname
+            );
 
             // Remove sync param to avoid redirect loop (skipped when running in cron).
             $url = null;
@@ -514,9 +524,9 @@ EOD;
      *
      * The Drive API "contains" filter is broad and may return recordings from
      * other activities with similar names. This method applies stricter filtering:
-     * 1. If custom filter is set, use it (case-insensitive contains)
-     * 2. Recording name must start with the activity name (case-insensitive)
-     * 3. Or recording name must contain the exact meeting code
+     * 1. If a custom filter is set, require it as a delimited prefix
+     * 2. Otherwise, require the original Calendar event name as a delimited prefix
+     * 3. For legacy activities without an original name, allow the exact meeting code
      * 4. Recording must not already exist in another activity (avoid duplicates)
      *
      * @param array $recordings Array of recording objects from Drive API
@@ -524,9 +534,17 @@ EOD;
      * @param string $activityname The activity name in Moodle
      * @param int $googlemeetid The current activity ID
      * @param string $customfilter Custom filter pattern set by user
+     * @param bool $hasoriginalname Whether the activity has its original Calendar event name
      * @return array Filtered array of recordings
      */
-    private function filter_recordings_for_activity($recordings, $meetingcode, $activityname, $googlemeetid, $customfilter = '') {
+    private function filter_recordings_for_activity(
+        $recordings,
+        $meetingcode,
+        $activityname,
+        $googlemeetid,
+        $customfilter = '',
+        $hasoriginalname = false
+    ) {
         global $DB;
 
         if (empty($recordings)) {
@@ -572,35 +590,30 @@ EOD;
 
             // For new recordings, apply name-based filtering:
 
-            // Priority 1: If custom filter is set, check it first (case-insensitive contains).
+            // A match must be an exact prefix followed by a delimiter used in Google's filenames.
+            $expectedname = !empty($customfilterlower) ? $customfilterlower : $activitynamelower;
+            $pattern = '/^' . preg_quote($expectedname, '/') . '(?=$|[\s()_.-])/u';
+
+            // A custom filter is exclusive. Do not fall back to broader criteria when it fails.
             if (!empty($customfilterlower)) {
-                if (strpos($recordingnamelower, $customfilterlower) !== false) {
+                if (preg_match($pattern, $recordingnamelower)) {
                     $filtered[] = $recording;
-                    continue;
                 }
-                // Custom filter didn't match — fall through to meetingcode/name checks
-                // instead of skipping. The custom filter is a bonus, not exclusive.
+                continue;
             }
 
-            // Check 2: Recording name contains the exact meeting code.
-            if (!empty($meetingcode) && strpos($recordingnamelower, \core_text::strtolower($meetingcode)) !== false) {
+            // Prefer the unique original Calendar event name (or activity name for legacy data).
+            if (!empty($activitynamelower) && preg_match($pattern, $recordingnamelower)) {
                 $filtered[] = $recording;
                 continue;
             }
 
-            // Check 3: Recording name starts with the activity name.
-            // This handles filenames like "Activity Name (2024-01-15 10:00).mp4".
-            if (!empty($activitynamelower) && strpos($recordingnamelower, $activitynamelower) === 0) {
+            // The meeting code is only a compatibility fallback for activities created without
+            // a Calendar event name. Reused Meet rooms must not broaden matching for new data.
+            $meetingcodepattern = '/(?<![a-z0-9])' . preg_quote(\core_text::strtolower($meetingcode), '/')
+                . '(?![a-z0-9])/u';
+            if (!$hasoriginalname && !empty($meetingcode) && preg_match($meetingcodepattern, $recordingnamelower)) {
                 $filtered[] = $recording;
-                continue;
-            }
-
-            // Check 4: Recording name contains the full activity name followed by space or parenthesis.
-            // This handles cases where the name might have a prefix or different format.
-            $pattern = preg_quote($activitynamelower, '/');
-            if (preg_match('/\b' . $pattern . '\s*[\(\-]/i', $recordingnamelower)) {
-                $filtered[] = $recording;
-                continue;
             }
         }
 
