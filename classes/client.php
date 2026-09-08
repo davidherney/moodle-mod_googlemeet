@@ -320,29 +320,6 @@ EOD;
         if ($this->check_login()) {
             $service = new rest($this->get_user_oauth_client());
 
-            // Search for Meet Recordings folder in multiple languages.
-            // Google localises the auto-created folder name to the account language.
-            $folderparams = [
-                'q' => '(name = "Meet Recordings" or name = "Google Meet" or name contains "Registros de reuniones") and
-                        trashed = false and
-                        mimeType = "application/vnd.google-apps.folder" and
-                        "me" in owners',
-                'pageSize' => 1000,
-                'fields' => 'nextPageToken, files(id,owners)'
-            ];
-
-            $folderresponse = helper::request($service, 'list', $folderparams, false);
-
-            $folders = $folderresponse->files;
-            $parents = '';
-            $folderscount = count($folders);
-            for ($i = 0; $i < $folderscount; $i++) {
-                $parents .= 'parents="'.$folders[$i]->id.'"';
-                if ($i + 1 < $folderscount) {
-                    $parents .= ' or ';
-                }
-            }
-
             $meetingcode = substr($googlemeet->url, 24, 12);
             $hasoriginalname = !empty(trim($googlemeet->originalname ?? ''));
             $name = $hasoriginalname ? trim($googlemeet->originalname) : trim($googlemeet->name);
@@ -360,6 +337,45 @@ EOD;
                 ];
             }
             $namefilter = '(' . implode(' or ', $conditions) . ')';
+
+            // Search for Meet Recordings folder in multiple languages.
+            // Google localises the auto-created folder name to the account language.
+            // Newer accounts use "Google Meet" with per-meeting subfolders for videos.
+            $folderparams = [
+                'q' => '(name = "Meet Recordings" or name = "Google Meet" or name contains "Registros de reuniones") and
+                        trashed = false and
+                        mimeType = "application/vnd.google-apps.folder" and
+                        "me" in owners',
+                'pageSize' => 1000,
+                'fields' => 'nextPageToken, files(id,name,owners)'
+            ];
+
+            $folderresponse = helper::request($service, 'list', $folderparams, false);
+
+            $folders = $folderresponse->files ?? [];
+            $parentids = [];
+            foreach ($folders as $folder) {
+                $foldername = $folder->name ?? '';
+                if ($foldername === 'Google Meet') {
+                    // Videos live in meeting subfolders, not directly under "Google Meet".
+                    $subfolders = $this->find_meeting_subfolders($service, $folder->id, $namefilter);
+                    foreach ($subfolders as $subfolder) {
+                        $parentids[] = $subfolder->id;
+                    }
+                } else {
+                    // Flat layout: Meet Recordings / Registros de reuniones.
+                    $parentids[] = $folder->id;
+                }
+            }
+
+            $parents = '';
+            $parentidscount = count($parentids);
+            for ($i = 0; $i < $parentidscount; $i++) {
+                $parents .= 'parents="' . $parentids[$i] . '"';
+                if ($i + 1 < $parentidscount) {
+                    $parents .= ' or ';
+                }
+            }
 
             // If no folders found, try searching ALL of Drive (no parent filter).
             if (empty($parents)) {
@@ -618,6 +634,37 @@ EOD;
         }
 
         return $filtered;
+    }
+
+    /**
+     * Find meeting subfolders under a "Google Meet" Drive folder.
+     *
+     * Newer Google Meet layouts store recordings inside per-meeting subfolders
+     * whose names include the meeting title plus date/time suffixes. Uses the
+     * same broad name filter as video search.
+     *
+     * @param rest $service The REST service
+     * @param string $googlemeetfolderid Drive folder ID of "Google Meet"
+     * @param string $namefilter Drive query fragment, e.g. '(name contains "…")'
+     * @return array List of folder objects with at least ->id
+     */
+    private function find_meeting_subfolders($service, $googlemeetfolderid, $namefilter) {
+        $params = [
+            'q' => 'parents="' . $googlemeetfolderid . '" and
+                    trashed = false and
+                    mimeType = "application/vnd.google-apps.folder" and
+                    ' . $namefilter,
+            'pageSize' => 1000,
+            'fields' => 'files(id,name)',
+        ];
+
+        try {
+            $response = helper::request($service, 'list', $params, false);
+            return $response->files ?? [];
+        } catch (\Exception $e) {
+            debugging('Failed to list Google Meet subfolders: ' . $e->getMessage(), DEBUG_DEVELOPER);
+            return [];
+        }
     }
 
     /**
