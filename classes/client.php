@@ -323,7 +323,7 @@ EOD;
             // Search for Meet Recordings folder in multiple languages.
             // Google localises the auto-created folder name to the account language.
             $folderparams = [
-                'q' => '(name = "Meet Recordings" or name contains "Registros de reuniones") and
+                'q' => '(name = "Meet Recordings" or name = "Google Meet" or name contains "Registros de reuniones") and
                         trashed = false and
                         mimeType = "application/vnd.google-apps.folder" and
                         "me" in owners',
