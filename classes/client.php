@@ -325,16 +325,16 @@ EOD;
             $name = $hasoriginalname ? trim($googlemeet->originalname) : trim($googlemeet->name);
             $customfilter = trim($googlemeet->recordingfilter ?? '');
 
-            // Keep the Drive query broad enough for Google's generated suffixes. A stricter,
-            // delimiter-aware prefix check is applied locally below. A custom filter is
-            // exclusive: it must not fall back to the activity name or meeting code.
-            if (!empty($customfilter)) {
-                $conditions = ['name contains "' . $customfilter . '"'];
-            } else {
-                $conditions = [
-                    'name contains "' . $meetingcode . '"',
-                    'name contains "' . $name . '"',
-                ];
+            // Keep the Drive query broad (meeting code / activity name / optional filter) so
+            // already-synced recordings remain in the result set and are not deleted on re-sync.
+            // A stricter, delimiter-aware prefix check is applied locally for new recordings;
+            // when a custom filter is set, that local check is exclusive for inserts only.
+            $conditions = [
+                'name contains "' . $meetingcode . '"',
+                'name contains "' . $name . '"',
+            ];
+            if (!empty($customfilter) && $customfilter !== $name) {
+                $conditions[] = 'name contains "' . $customfilter . '"';
             }
             $namefilter = '(' . implode(' or ', $conditions) . ')';
 
